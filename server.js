@@ -3,10 +3,14 @@ const cors = require('cors');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const TINY_API_TOKEN = process.env.TINY_API_TOKEN;
+const DINAMIZE_EMAIL = process.env.DINAMIZE_EMAIL;
+const DINAMIZE_PASSWORD = process.env.DINAMIZE_PASSWORD;
+const DINAMIZE_LIST_ID = 1; // "Meus contatos"
 
 app.use(cors());
 app.use(express.json());
 
+// ─── Pedidos Tiny ERP ───────────────────────────────────────────────────────
 app.get('/api/pedidos', async (req, res) => {
   const { cliente } = req.query;
   if (!TINY_API_TOKEN) return res.status(500).json({ error: 'TINY_API_TOKEN nao configurado' });
@@ -32,8 +36,73 @@ app.get('/api/pedidos', async (req, res) => {
   }
 });
 
+// ─── Health check ────────────────────────────────────────────────────────────
 app.get('/api/healthz', (_req, res) => res.json({ status: 'ok' }));
 
+// ─── Dinamize: obter token de autenticação ───────────────────────────────────
+async function getDinamizeToken() {
+  const resp = await fetch('https://api.dinamize.com/v3/auth/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: DINAMIZE_EMAIL, password: DINAMIZE_PASSWORD })
+  });
+  if (!resp.ok) throw new Error('Falha ao autenticar na Dinamize: ' + resp.status);
+  const data = await resp.json();
+  return data.token || data.access_token;
+}
+
+// ─── Dinamize: adicionar contato à lista ─────────────────────────────────────
+async function addContactToDinamize(nome, email, telefone) {
+  const token = await getDinamizeToken();
+  const contact = { email };
+  if (nome) contact.name = nome;
+  if (telefone) contact.phone = telefone;
+  contact.origem = 'Chat Tawk.to';
+
+  const resp = await fetch(`https://api.dinamize.com/v3/contact/list/${DINAMIZE_LIST_ID}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    },
+    body: JSON.stringify(contact)
+  });
+  const result = await resp.json();
+  console.log('[Dinamize] Contato adicionado:', JSON.stringify(result));
+  return result;
+}
+
+// ─── Webhook do Tawk.to ───────────────────────────────────────────────────────
+app.post('/webhook/tawk', async (req, res) => {
+  try {
+    const payload = req.body;
+    console.log('[webhook/tawk] Recebido:', JSON.stringify(payload).substring(0, 300));
+
+    // Tawk.to envia diferentes eventos; capturar dados do visitante
+    const visitor = payload.visitor || payload.chat?.visitor || {};
+    const nome = visitor.name || '';
+    const email = visitor.email || '';
+    const telefone = visitor.phone || '';
+
+    // Só salvar se tiver email
+    if (!email) {
+      console.log('[webhook/tawk] Sem email, ignorando');
+      return res.json({ status: 'ignored', reason: 'no email' });
+    }
+
+    if (!DINAMIZE_EMAIL || !DINAMIZE_PASSWORD) {
+      return res.status(500).json({ error: 'Credenciais Dinamize nao configuradas' });
+    }
+
+    await addContactToDinamize(nome, email, telefone);
+    res.json({ status: 'ok', email });
+  } catch (err) {
+    console.error('[webhook/tawk] Erro:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Start ────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
 
@@ -46,5 +115,5 @@ app.listen(PORT, () => {
     } catch (e) {
       console.log(`[keep-alive] ping falhou: ${e.message}`);
     }
-  }, 14 * 60 * 1000); // 14 minutos
+  }, 14 * 60 * 1000);
 });
